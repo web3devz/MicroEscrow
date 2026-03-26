@@ -14,6 +14,84 @@ export default function CreateEscrow({ onSuccess }: Props) {
   const [desc, setDesc] = useState('')
   const [txDigest, setTxDigest] = useState('')
   const [error, setError] = useState('')
+  const [aiPending, setAiPending] = useState(false)
+  const [aiError, setAiError] = useState('')
+
+  const extractText = (payload: unknown): string => {
+    if (!payload || typeof payload !== 'object') return ''
+    const data = payload as {
+      output_text?: unknown
+      output?: Array<{ content?: Array<{ text?: unknown }> }>
+    }
+    if (typeof data.output_text === 'string' && data.output_text.trim()) return data.output_text.trim()
+    const chunks = data.output ?? []
+    const lines: string[] = []
+    for (const chunk of chunks) {
+      for (const item of chunk?.content ?? []) {
+        if (typeof item?.text === 'string' && item.text.trim()) lines.push(item.text.trim())
+      }
+    }
+    return lines.join('\n').trim()
+  }
+
+  const rewriteDescription = async () => {
+    const key = import.meta.env.VITE_OPENAI_KEY as string | undefined
+    if (!key?.trim()) {
+      setAiError('Missing VITE_OPENAI_KEY in .env')
+      return
+    }
+    if (!desc.trim()) {
+      setAiError('Enter a description first, then click rewrite.')
+      return
+    }
+
+    setAiPending(true)
+    setAiError('')
+    try {
+      const response = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify({
+          model: 'gpt-4.1-mini',
+          input: [
+            {
+              role: 'system',
+              content:
+                'You rewrite escrow agreement descriptions for clarity and enforceability. Keep language concise, specific, and neutral.',
+            },
+            {
+              role: 'user',
+              content: [
+                `Current description: ${desc}`,
+                `Recipient: ${recipient || 'N/A'}`,
+                `Amount: ${amount || 'N/A'}`,
+                'Rewrite in plain text only. No markdown, no bullet points. Maximum 220 characters.',
+              ].join('\n'),
+            },
+          ],
+          temperature: 0.3,
+          max_output_tokens: 160,
+        }),
+      })
+
+      if (!response.ok) {
+        const details = await response.text()
+        throw new Error(`OpenAI request failed (${response.status}): ${details.slice(0, 180)}`)
+      }
+
+      const data = (await response.json()) as unknown
+      const rewritten = extractText(data)
+      if (!rewritten) throw new Error('No rewrite returned from API.')
+      setDesc(rewritten.slice(0, 220))
+    } catch (e) {
+      setAiError(e instanceof Error ? e.message : 'Unable to rewrite description right now.')
+    } finally {
+      setAiPending(false)
+    }
+  }
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -46,6 +124,13 @@ export default function CreateEscrow({ onSuccess }: Props) {
           <label>Amount (units) *<input type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="100" min="1" required /></label>
         </div>
         <label>Description<textarea value={desc} onChange={e => setDesc(e.target.value)} placeholder="What is this escrow for?" rows={2} /></label>
+        <div className="ai-tools-row">
+          <button type="button" className="btn-secondary" onClick={rewriteDescription} disabled={aiPending}>
+            {aiPending ? 'Rewriting...' : '✨ Rewrite Description'}
+          </button>
+          <span className="char-hint">{desc.length}/220</span>
+        </div>
+        {aiError && <p className="error">⚠ {aiError}</p>}
         {error && <p className="error">⚠ {error}</p>}
         <button type="submit" className="btn-primary" disabled={isPending}>{isPending ? 'Creating...' : '🔒 Create Escrow'}</button>
       </form>
